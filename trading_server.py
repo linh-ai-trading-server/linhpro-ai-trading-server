@@ -272,7 +272,7 @@ def webhook_m15():
             threading.Thread(target=process_signal, args=(False, "🔥 CẮT SLOW BASELINE (BÁN)", st_trend)).start()
         return jsonify({"status": "success - Base Slow"})
 
-@app.route('/')
+@app.route('/', methods=['GET'])
 def home():
     return "AI Server is running perfectly!"
 
