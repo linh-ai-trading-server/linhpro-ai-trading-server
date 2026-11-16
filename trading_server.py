@@ -26,7 +26,7 @@ client = genai.Client(api_key=clean_key)
 # 2. CẤU HÌNH QUẢN LÝ RỦI RO
 # ==========================================
 RISK_USD = 100.0
-h1_trend_state = 0
+h1_trend_state = {} # Từ điển lưu trạng thái H1 cho từng mã
 last_h1_update_time = 0
 
 # ==========================================
@@ -99,25 +99,18 @@ def ask_ai_analyst(symbol, action, price, atr, h1_trend):
 @app.route('/webhook_h1', methods=['POST'])
 def webhook_h1():
     global h1_trend_state, last_h1_update_time
-    try:
-        data = request.get_json()
-        action = data.get("action")
-
-        # Lấy tên mã từ JSON (nếu có), nếu không có thì ghi là UNKNOWN
-        symbol = data.get("symbol", "UNKNOWN")
-
-        if "H1_TREND_UP" in action or "H1_CROSS_UP" in action:
-            h1_trend_state = 1
-            last_h1_update_time = time.time()
-            send_telegram_message(f"📈 <b>H1 BÁO ĐỘNG ({symbol}):</b> SuperTrend đổi sang TĂNG.\n👉 Đang chờ tín hiệu M15...")
-        elif "H1_TREND_DOWN" in action or "H1_CROSS_DOWN" in action:
-            h1_trend_state = -1
-            last_h1_update_time = time.time()
-            send_telegram_message(f"📉 <b>H1 BÁO ĐỘNG ({symbol}):</b> SuperTrend đổi sang GIẢM.\n👉 Đang chờ tín hiệu M15...")
-
-        return jsonify({"status": "success", "current_trend": h1_trend_state, "symbol": symbol})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
+    data = request.get_json()
+    action = data.get("action")
+    symbol = data.get("symbol", "UNKNOWN")
+    
+    if "H1_TREND_UP" in action or "H1_CROSS_UP" in action:
+        h1_trend_state[symbol] = 1  # Lưu riêng cho mã này
+        send_telegram_message(f"📈 <b>H1 BÁO ĐỘNG ({symbol}):</b> SuperTrend đổi sang TĂNG.")
+    elif "H1_TREND_DOWN" in action or "H1_CROSS_DOWN" in action:
+        h1_trend_state[symbol] = -1 # Lưu riêng cho mã này
+        send_telegram_message(f"📉 <b>H1 BÁO ĐỘNG ({symbol}):</b> SuperTrend đổi sang GIẢM.")
+        
+    return jsonify({"status": "success", "current_trend": h1_trend_state.get(symbol, 0)})
 
 
 import threading # Đảm bảo đã import ở đầu file
@@ -143,7 +136,7 @@ def webhook_m15():
     except Exception as e:
         return jsonify({"status": "error", "message": "Invalid data"})
 
-    # Hàm xử lý chạy ngầm (Không làm treo Server)
+       # Hàm xử lý chạy ngầm (Không làm treo Server)
     def process_and_send():
         try:
             if symbol == "XAUUSD": contract_size = 100
@@ -152,9 +145,12 @@ def webhook_m15():
             elif symbol == "JP225": contract_size = 10
             else: contract_size = 1
 
+            # Lấy trạng thái H1 riêng của mã này (mặc định là 0 nếu chưa có)
+            current_h1_trend = h1_trend_state.get(symbol, 0)
+
             is_buy = "BUY" in action
             if is_buy:
-                status_text = "✅ VÀO LỆNH NGAY (Thuận H1)" if h1_trend_state == 1 else "⏳ CHỜ XÁC NHẬN (Ngược H1)"
+                status_text = "✅ VÀO LỆNH NGAY (Thuận H1)" if current_h1_trend == 1 else "⏳ CHỜ XÁC NHẬN (Ngược H1)"
                 sl = low - 0.5
                 risk = price - sl
                 if risk > 0:
@@ -167,7 +163,7 @@ def webhook_m15():
                            f"📦 Vol: <code>{vol} lots</code>")
                     send_telegram_message(msg)
             else:
-                status_text = "✅ VÀO LỆNH NGAY (Thuận H1)" if h1_trend_state == -1 else "⏳ CHỜ XÁC NHẬN (Ngược H1)"
+                status_text = "✅ VÀO LỆNH NGAY (Thuận H1)" if current_h1_trend == -1 else "⏳ CHỜ XÁC NHẬN (Ngược H1)"
                 sl = high + 0.5
                 risk = sl - price
                 if risk > 0:
