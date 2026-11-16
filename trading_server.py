@@ -193,11 +193,6 @@ def webhook_m15():
         elif "SELL" in action: process_and_send(False, "⚡ RSI", st_trend)
         return jsonify({"status": "success - RSI"})
 
-    if "BASE_SLOW" in action:
-        if "UP" in action: process_and_send(True, "🔥 CẮT SLOW BASELINE", st_trend)
-        elif "DOWN" in action: process_and_send(False, "🔥 CẮT SLOW BASELINE", st_trend)
-        return jsonify({"status": "success - Base Slow"})
-
     return jsonify({"status": "success"})
 
     # Hàm xử lý tính toán và gửi tin nhắn
