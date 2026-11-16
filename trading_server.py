@@ -262,9 +262,9 @@ def webhook_m15():
         return jsonify({"status": "success - RSI"})
 
     if "BASE_SLOW" in action:
-        if "BUY" in action:
+        if "UP" in action:
             threading.Thread(target=process_signal, args=(True, "🔥 CẮT SLOW BASELINE (MUA)", st_trend)).start()
-        elif "SELL" in action:
+        elif "DOWN" in action:
             threading.Thread(target=process_signal, args=(False, "🔥 CẮT SLOW BASELINE (BÁN)", st_trend)).start()
         return jsonify({"status": "success - Base Slow"})
 
