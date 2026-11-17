@@ -71,20 +71,16 @@ def process_signal_data(data):
 
         # XÁC ĐỊNH MUA/BÁN CHÍNH XÁC
         is_buy = False
-        if "BASE_SLOW" in action:
-            if "UP" in action: 
-                is_buy = True
-            elif "DOWN" in action: 
-                is_buy = False
-        elif "EARLY_WARNING" in action or "RSI" in action:
-            if "BUY" in action: 
-                is_buy = True
-            elif "SELL" in action: 
-                is_buy = False
-        else:
-            # Nếu không khớp các trường hợp trên, tự động dò chữ BUY/SELL
-            if "BUY" in action: is_buy = True
-            elif "SELL" in action: is_buy = False
+        # Ưu tiên dò UP/DOWN trước (cho BASE_SLOW)
+        if "UP" in action:
+            is_buy = True
+        elif "DOWN" in action:
+            is_buy = False
+        # Nếu không có UP/DOWN thì mới dò BUY/SELL
+        elif "BUY" in action:
+            is_buy = True
+        elif "SELL" in action:
+            is_buy = False
 
         # Gắn nhãn tín hiệu
         sig_label = "🔥 CẮT SLOW BASELINE"
