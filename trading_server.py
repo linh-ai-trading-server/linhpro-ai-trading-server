@@ -55,10 +55,10 @@ def process_signal_data(data):
         symbol = data.get("symbol", "UNKNOWN")
         if symbol == "UNKNOWN":
             if 3300 <= price <= 5000: symbol = "XAUUSD"
-            elif price > 64100: symbol = "BTCUSD"
-            elif 27300 <= price <= 35000: symbol = "US100"
-            elif 20000 <= price <= 27200: symbol = "GER40"
-            elif 55000 <= price <= 64000: symbol = "JP225"
+            elif price > 62100: symbol = "BTCUSD"
+            elif 27000 <= price <= 35000: symbol = "US100"
+            elif 20000 <= price <= 26900: symbol = "GER40"
+            elif 55000 <= price <= 62000: symbol = "JP225"
 
         if symbol == "XAUUSD": contract_size = 100
         elif symbol == "US100": contract_size = 10
