@@ -69,12 +69,22 @@ def process_signal_data(data):
         # Lấy trạng thái H1 riêng của mã này
         current_h1_trend = h1_trend_state.get(symbol, 0)
 
-        # Xác định Mua/Bán
+        # XÁC ĐỊNH MUA/BÁN CHÍNH XÁC
         is_buy = False
         if "BASE_SLOW" in action:
-            if "UP" in action: is_buy = True
-        elif "BUY" in action:
-            is_buy = True
+            if "UP" in action: 
+                is_buy = True
+            elif "DOWN" in action: 
+                is_buy = False
+        elif "EARLY_WARNING" in action or "RSI" in action:
+            if "BUY" in action: 
+                is_buy = True
+            elif "SELL" in action: 
+                is_buy = False
+        else:
+            # Nếu không khớp các trường hợp trên, tự động dò chữ BUY/SELL
+            if "BUY" in action: is_buy = True
+            elif "SELL" in action: is_buy = False
 
         # Gắn nhãn tín hiệu
         sig_label = "🔥 CẮT SLOW BASELINE"
