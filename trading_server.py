@@ -95,7 +95,7 @@ def process_signal_data(data):
                 vol = round(RISK_USD / (risk * contract_size), 2)
                 if vol < 0.01: vol = 0.01
                 tp1, tp2, tp3 = price + risk*3, price + risk*5, price + risk*7
-                msg = (f"{status_text} <b>{sig_label}: MUA {symbol}</b>\n📈 <b>SuperTrend:</b> {st_trend}\n"
+                msg = (f"{status_text} <b>{sig_label}: MUA {symbol}</b>\n📈 <b>SuperTrendM15:</b> {st_trend}\n"
                        f"💰 Entry: <code>{price}</code>\n🛑 SL: <code>{round(sl,2)}</code>\n"
                        f"🎯 TP1: <code>{round(tp1,2)}</code> | TP2: <code>{round(tp2,2)}</code> | TP3: <code>{round(tp3,2)}</code>\n"
                        f"📦 Vol: <code>{vol} lots</code>")
@@ -109,7 +109,7 @@ def process_signal_data(data):
                 vol = round(RISK_USD / (risk * contract_size), 2)
                 if vol < 0.01: vol = 0.01
                 tp1, tp2, tp3 = price - risk*3, price - risk*5, price - risk*7
-                msg = (f"{status_text} <b>{sig_label}: BÁN {symbol}</b>\n📉 <b>SuperTrend:</b> {st_trend}\n"
+                msg = (f"{status_text} <b>{sig_label}: BÁN {symbol}</b>\n📉 <b>SuperTrendM15:</b> {st_trend}\n"
                        f"💰 Entry: <code>{price}</code>\n🛑 SL: <code>{round(sl,2)}</code>\n"
                        f"🎯 TP1: <code>{round(tp1,2)}</code> | TP2: <code>{round(tp2,2)}</code> | TP3: <code>{round(tp3,2)}</code>\n"
                        f"📦 Vol: <code>{vol} lots</code>")
@@ -129,10 +129,10 @@ def webhook_h1():
     
     if "H1_TREND_UP" in action or "H1_CROSS_UP" in action:
         h1_trend_state[symbol] = 1
-        send_telegram_message(f"📈 <b>H1 BÁO ĐỘNG ({symbol}):</b> SuperTrend đổi sang TĂNG.")
+        send_telegram_message(f"📈 <b>H1 BÁO ĐỘNG ({symbol}):</b> SuperTrendH1 đổi sang TĂNG.")
     elif "H1_TREND_DOWN" in action or "H1_CROSS_DOWN" in action:
         h1_trend_state[symbol] = -1
-        send_telegram_message(f"📉 <b>H1 BÁO ĐỘNG ({symbol}):</b> SuperTrend đổi sang GIẢM.")
+        send_telegram_message(f"📉 <b>H1 BÁO ĐỘNG ({symbol}):</b> SuperTrendH1 đổi sang GIẢM.")
         
     return jsonify({"status": "success", "current_trend": h1_trend_state.get(symbol, 0)})
 
