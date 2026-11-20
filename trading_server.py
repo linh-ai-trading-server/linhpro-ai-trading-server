@@ -4,7 +4,7 @@ import json
 import os
 import csv
 import threading
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 app = Flask(__name__)
 
@@ -26,6 +26,17 @@ CONTRACT_SIZE = {
     "JP225": 10,
     "BTCUSD": 1,
 }
+
+try:
+    from zoneinfo import ZoneInfo
+    TZ = ZoneInfo(os.environ.get("TZ_NAME", "Asia/Ho_Chi_Minh"))
+except Exception:
+    TZ = timezone(timedelta(hours=7))
+
+
+def now_local():
+    return datetime.now(TZ)
+
 
 STATE_FILE = "h1_state.json"
 CSV_FILE = "trading_report.csv"
@@ -116,8 +127,9 @@ def parse_direction(action):
     return None
 
 
-def handle_h1_trend(symbol, trend):
-    """Chỉ cập nhật trạng thái H1 và báo tin ngắn, KHÔNG tạo thẻ vào lệnh."""
+def handle_h1_trend(symbol, trend, data=None):
+    """Chỉ cập nhật trạng thái H1 và báo tin, KHÔNG tạo thẻ vào lệnh."""
+    data = data or {}
     if not symbol:
         print("H1 bỏ qua: thiếu symbol")
         return
@@ -127,10 +139,24 @@ def handle_h1_trend(symbol, trend):
         save_state()
     if old == trend:
         return  # không đổi thì không báo lại
-    if trend == 1:
-        send_telegram_message(f"📈 <b>H1 BÁO ĐỘNG ({symbol}):</b> SuperTrend H1 đổi sang TĂNG.")
-    else:
-        send_telegram_message(f"📉 <b>H1 BÁO ĐỘNG ({symbol}):</b> SuperTrend H1 đổi sang GIẢM.")
+
+    names = {1: "TĂNG", -1: "GIẢM", 0: "CHƯA RÕ"}
+    icon = "📈" if trend == 1 else "📉"
+    lines = [f"{icon} <b>H1 BÁO ĐỘNG ({symbol}):</b> SuperTrend H1 đổi sang <b>{names[trend]}</b>"
+             f" (trước đó: {names[old]})."]
+
+    price = to_float(data.get("price"))
+    atr = to_float(data.get("atr"))
+    if price > 0:
+        info = f"💰 Giá đóng nến H1: <code>{price}</code>"
+        if atr > 0:
+            info += f" | ATR14: <code>{round(atr, 2)}</code>"
+        lines.append(info)
+    st_m15 = data.get("st_trend")
+    if st_m15:
+        lines.append(f"📊 SuperTrend M15 hiện tại: {st_m15}")
+    lines.append(f"🕒 {now_local().strftime('%d/%m %H:%M')} (nến H1 đã đóng)")
+    send_telegram_message("\n".join(lines))
 
 
 # ==========================================
@@ -142,9 +168,10 @@ def process_signal_data(data):
         symbol = normalize_symbol(data.get("symbol"))
 
         # 1) Tín hiệu xu hướng H1 (kể cả khi TradingView gửi nhầm vào cổng M15)
-        h1 = parse_h1_action(action)
-        if h1 is not None:
-            handle_h1_trend(symbol, h1)
+        # H1 chỉ được nhận qua /webhook_h1 (alert trên chart 1h, nến đã đóng).
+        # Tin H1 đến từ cổng M15 có thể là báo giả do nến H1 chưa đóng -> bỏ qua.
+        if parse_h1_action(action) is not None:
+            print(f"BỎ QUA {action} từ /webhook_m15 (H1 chỉ nhận qua /webhook_h1)")
             return
 
         # 2) Tín hiệu vào lệnh
@@ -216,7 +243,7 @@ def process_signal_data(data):
             capped_note = f"\n⚠️ Volume đã bị giới hạn ở {MAX_LOT} lots"
 
         tp1, tp2, tp3 = (price + sign * risk * k for k in (3, 5, 7))
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = now_local().strftime("%Y-%m-%d %H:%M:%S")
 
         msg = (f"{status_text} <b>{sig_label}: {side_txt} {symbol}</b>\n"
                f"{icon} <b>SuperTrendM15:</b> {st_trend}\n"
@@ -247,7 +274,7 @@ def webhook_h1():
         if trend is None:
             return jsonify({"status": "ignored", "action": action})
 
-        handle_h1_trend(symbol, trend)
+        handle_h1_trend(symbol, trend, data)
         return jsonify({"status": "success", "current_trend": h1_trend_state.get(symbol, 0)})
     except Exception as e:
         print(f"LỖI webhook_h1: {e}")
@@ -277,7 +304,7 @@ def home():
     return jsonify({
         "status": "running",
         "h1_states": h1_trend_state,
-        "time": datetime.now().isoformat()
+        "time": now_local().isoformat()
     })
 
 
