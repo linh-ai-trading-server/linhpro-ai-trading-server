@@ -18,14 +18,21 @@ RISK_USD = float(os.environ.get("RISK_USD", 100))
 MAX_LOT = float(os.environ.get("MAX_LOT", 3.0))        # Trần volume an toàn (chỉnh theo vốn của bạn)
 MIN_RISK_ATR = float(os.environ.get("MIN_RISK_ATR", 0.3))  # SL tối thiểu = 0.3 x ATR, gần hơn thì bỏ tín hiệu
 
-# Contract size theo từng mã (để tính volume từ RISK_USD)
+# Tỷ giá quy đổi sang USD (chỉnh bằng biến môi trường trên Render khi tỷ giá lệch nhiều)
+USDJPY = float(os.environ.get("USDJPY", 158.8))
+EURUSD = float(os.environ.get("EURUSD", 1.16))
+
+# Giá trị (USD) khi giá đi 1.00 điểm với 1 lot — đã đối chiếu với lệnh thật trên tài khoản của bạn
 CONTRACT_SIZE = {
-    "XAUUSD": 100,
-    "US100": 10,
-    "GER40": 5,
-    "JP225": 10,
-    "BTCUSD": 1,
+    "XAUUSD": 100,          # đã kiểm tra: 0.01 lot, giá đi 3.25 -> 3.25 USD
+    "US100": 1,             # đã kiểm tra: 4 lot, giá đi 162.45 -> 649.80 USD
+    "GER40": 1 * EURUSD,    # đã kiểm tra: 1 EUR/điểm/lot (~1.16 USD)
+    "JP225": 10 / USDJPY,   # đã kiểm tra: ~0.063 USD/điểm/lot (10 JPY)
+    "BTCUSD": 1,            # đã kiểm tra: 0.24 lot, giá đi 803.66 -> 192.88 USD
 }
+
+# Trần volume riêng cho từng mã (mã không có ở đây dùng MAX_LOT chung)
+MAX_LOT_BY_SYMBOL = {"JP225": 10.0}  # 1 lot JP225 chỉ ~0.063 USD/điểm nên cần trần cao hơn
 
 try:
     from zoneinfo import ZoneInfo
@@ -238,9 +245,10 @@ def process_signal_data(data):
         raw_vol = RISK_USD / (risk * contract_size)
         vol = max(round(raw_vol, 2), 0.01)
         capped_note = ""
-        if vol > MAX_LOT:
-            vol = MAX_LOT
-            capped_note = f"\n⚠️ Volume đã bị giới hạn ở {MAX_LOT} lots"
+        max_lot = MAX_LOT_BY_SYMBOL.get(symbol, MAX_LOT)
+        if vol > max_lot:
+            vol = max_lot
+            capped_note = f"\n⚠️ Volume đã bị giới hạn ở {max_lot} lots"
 
         tp1, tp2, tp3 = (price + sign * risk * k for k in (3, 5, 7))
         now_str = now_local().strftime("%Y-%m-%d %H:%M:%S")
