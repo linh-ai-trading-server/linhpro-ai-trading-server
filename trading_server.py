@@ -31,6 +31,19 @@ CONTRACT_SIZE = {
     "BTCUSD": 1,            # đã kiểm tra: 0.24 lot, giá đi 803.66 -> 192.88 USD
 }
 
+# Forex chuẩn (1 lot = 100.000 đơn vị) — CHƯA kiểm tra trên tài khoản của bạn, xác nhận trước khi dùng thật
+CONTRACT_SIZE["EURUSD"] = 100000
+CONTRACT_SIZE["USDJPY"] = 100000 / USDJPY
+# US30, NEARUSD, USOIL: chưa có số đã kiểm tra -> tin vẫn gửi nhưng Vol ghi "chưa cấu hình".
+# Khi đã xác nhận, đặt trên Render, ví dụ: CONTRACT_SIZE_JSON={"US30": 1, "USOIL": 1000}
+try:
+    CONTRACT_SIZE.update({k.upper(): float(v) for k, v in json.loads(os.environ.get("CONTRACT_SIZE_JSON", "{}")).items()})
+except Exception as e:
+    print(f"LỖI CONTRACT_SIZE_JSON: {e}")
+
+TF_NAMES = {"1": "M1", "5": "M5", "15": "M15", "30": "M30", "60": "H1", "240": "H4", "D": "D1", "1D": "D1"}
+SYMBOL_ALIAS = {"WTICOUSD": "USOIL", "USOILSPOT": "USOIL", "CL1!": "USOIL", "US30USD": "US30", "DJI": "US30"}
+
 # Trần volume riêng cho từng mã (mã không có ở đây dùng MAX_LOT chung)
 MAX_LOT_BY_SYMBOL = {"JP225": 10.0}  # 1 lot JP225 chỉ ~0.063 USD/điểm nên cần trần cao hơn
 
@@ -99,7 +112,7 @@ def write_to_csv(time_str, symbol, action, sig_type, entry, sl, tp1, tp2, tp3, v
             for icon in ("✅ ", "⚠️ ", "⚡ ", "🔥 ", "🎯 "):
                 clean_sig = clean_sig.replace(icon, "")
             writer.writerow([time_str, symbol, action, clean_sig, status,
-                             entry, round(sl, 2), round(tp1, 2), round(tp2, 2), round(tp3, 2), vol])
+                             entry, round(sl, 6), round(tp1, 6), round(tp2, 6), round(tp3, 6), vol])
 
 
 def to_float(value):
@@ -111,18 +124,30 @@ def to_float(value):
 
 def normalize_symbol(raw):
     # "OANDA:XAUUSD" -> "XAUUSD"
-    return str(raw or "").strip().upper().split(":")[-1]
+    sym = str(raw or "").strip().upper().split(":")[-1]
+    return SYMBOL_ALIAS.get(sym, sym)
+
+
+def fmt_price(x, ref):
+    """Số chữ số thập phân theo mức giá (EURUSD 5 số, USDJPY 3 số, chỉ số/vàng/BTC 2 số)."""
+    ref = abs(ref)
+    nd = 2 if ref >= 1000 else 3 if ref >= 100 else 4 if ref >= 10 else 5
+    return f"{round(x, nd):.{nd}f}"
 
 
 def parse_h1_action(action):
-    """H1_TREND_UP / H1_CROSS_UP / H1_ST_CROSS_UP ... -> 1 | -1 ; không phải H1 -> None"""
-    a = action.upper()
-    if a.startswith("H1_"):
-        if a.endswith("_UP"):
+    """H1_/H4_ ..._UP / ..._DOWN -> 1 | -1 ; không phải tín hiệu xu hướng -> None"""
+    a_ = action.upper()
+    if a_.startswith("H1_") or a_.startswith("H4_"):
+        if a_.endswith("_UP"):
             return 1
-        if a.endswith("_DOWN"):
+        if a_.endswith("_DOWN"):
             return -1
     return None
+
+
+def trend_tf_of_action(action):
+    return "H4" if action.upper().startswith("H4_") else "H1"
 
 
 def parse_direction(action):
@@ -134,11 +159,11 @@ def parse_direction(action):
     return None
 
 
-def handle_h1_trend(symbol, trend, data=None):
-    """Chỉ cập nhật trạng thái H1 và báo tin, KHÔNG tạo thẻ vào lệnh."""
+def handle_h1_trend(symbol, trend, data=None, tf_name="H1"):
+    """Chỉ cập nhật trạng thái xu hướng lớn (H1 hoặc H4) và báo tin, KHÔNG tạo thẻ vào lệnh."""
     data = data or {}
     if not symbol:
-        print("H1 bỏ qua: thiếu symbol")
+        print("Xu hướng bỏ qua: thiếu symbol")
         return
     with _lock:
         old = h1_trend_state.get(symbol, 0)
@@ -149,20 +174,20 @@ def handle_h1_trend(symbol, trend, data=None):
 
     names = {1: "TĂNG", -1: "GIẢM", 0: "CHƯA RÕ"}
     icon = "📈" if trend == 1 else "📉"
-    lines = [f"{icon} <b>H1 BÁO ĐỘNG ({symbol}):</b> SuperTrend H1 đổi sang <b>{names[trend]}</b>"
+    lines = [f"{icon} <b>{tf_name} BÁO ĐỘNG ({symbol}):</b> SuperTrend {tf_name} đổi sang <b>{names[trend]}</b>"
              f" (trước đó: {names[old]})."]
 
     price = to_float(data.get("price"))
     atr = to_float(data.get("atr"))
     if price > 0:
-        info = f"💰 Giá đóng nến H1: <code>{price}</code>"
+        info = f"💰 Giá đóng nến {tf_name}: <code>{price}</code>"
         if atr > 0:
-            info += f" | ATR14: <code>{round(atr, 2)}</code>"
+            info += f" | ATR14: <code>{fmt_price(atr, price)}</code>"
         lines.append(info)
-    st_m15 = data.get("st_trend")
-    if st_m15:
-        lines.append(f"📊 SuperTrend M15 hiện tại: {st_m15}")
-    lines.append(f"🕒 {now_local().strftime('%d/%m %H:%M')} (nến H1 đã đóng)")
+    st_cur = data.get("st_trend")
+    if st_cur:
+        lines.append(f"📊 SuperTrend khung chart hiện tại: {st_cur}")
+    lines.append(f"🕒 {now_local().strftime('%d/%m %H:%M')} (nến {tf_name} đã đóng)")
     send_telegram_message("\n".join(lines))
 
 
@@ -174,11 +199,10 @@ def process_signal_data(data):
         action = str(data.get("action", ""))
         symbol = normalize_symbol(data.get("symbol"))
 
-        # 1) Tín hiệu xu hướng H1 (kể cả khi TradingView gửi nhầm vào cổng M15)
-        # H1 chỉ được nhận qua /webhook_h1 (alert trên chart 1h, nến đã đóng).
-        # Tin H1 đến từ cổng M15 có thể là báo giả do nến H1 chưa đóng -> bỏ qua.
+        # 1) Tín hiệu đổi hướng xu hướng lớn (H1/H4) chỉ được nhận qua /webhook_h1
+        # (alert trên chart đúng khung, nến đã đóng). Đến từ cổng vào lệnh -> bỏ qua.
         if parse_h1_action(action) is not None:
-            print(f"BỎ QUA {action} từ /webhook_m15 (H1 chỉ nhận qua /webhook_h1)")
+            print(f"BỎ QUA {action} từ /webhook_m15 (xu hướng chỉ nhận qua /webhook_h1)")
             return
 
         # 2) Tín hiệu vào lệnh
@@ -187,14 +211,13 @@ def process_signal_data(data):
             print(f"BỎ QUA action không nhận diện: {action}")
             return
 
-        if symbol not in CONTRACT_SIZE:
-            print(f"BỎ QUA mã không có contract size: '{symbol}' (action={action})")
-            return
-
         price = to_float(data.get("price"))
         high = to_float(data.get("high"))
         low = to_float(data.get("low"))
         atr = to_float(data.get("atr"))
+        buf = to_float(data.get("buf"))
+        if buf <= 0:
+            buf = 0.5  # đệm SL mặc định như cũ
         st_trend = data.get("st_trend", "Không rõ")
 
         # Kiểm tra dữ liệu: thiếu/0 thì tuyệt đối không tính lệnh
@@ -202,17 +225,23 @@ def process_signal_data(data):
             print(f"BỎ QUA dữ liệu không hợp lệ: {data}")
             return
 
-        contract_size = CONTRACT_SIZE[symbol]
-        current_h1_trend = h1_trend_state.get(symbol, 0)
+        contract_size = CONTRACT_SIZE.get(symbol)  # None nếu chưa cấu hình
+        current_trend = h1_trend_state.get(symbol, 0)
 
-        # Alert M15 (bản mới) gửi kèm hướng H1 của nến H1 đã đóng -> dùng luôn và tự phục hồi state,
+        # Tên khung xu hướng lớn (H1 hoặc H4) và khung vào lệnh (M15, H1...) do Pine gửi kèm
+        htf_name = str(data.get("htf") or "H1").upper()
+        if htf_name not in ("H1", "H4", "D"):
+            htf_name = "H1"
+        entry_tf = TF_NAMES.get(str(data.get("tf") or "15"), "M15")
+
+        # Alert (bản mới) gửi kèm hướng xu hướng lớn của nến đã đóng -> dùng luôn và tự phục hồi state,
         # không phụ thuộc việc Render có bị reset hay không.
         h1_in = to_float(data.get("h1"))
         if h1_in in (1.0, -1.0):
-            current_h1_trend = int(h1_in)
-            if h1_trend_state.get(symbol, 0) != current_h1_trend:
+            current_trend = int(h1_in)
+            if h1_trend_state.get(symbol, 0) != current_trend:
                 with _lock:
-                    h1_trend_state[symbol] = current_h1_trend
+                    h1_trend_state[symbol] = current_trend
                     save_state()
 
         sig_label = "🔥 CẮT SLOW BASELINE"
@@ -223,23 +252,23 @@ def process_signal_data(data):
         elif "RSI" in action:
             sig_label = "⚡ RSI"
 
-        # Trạng thái so với H1
-        aligned = (current_h1_trend == 1 and direction == "BUY") or \
-                  (current_h1_trend == -1 and direction == "SELL")
-        if current_h1_trend == 0:
-            status_text = "❔ H1 CHƯA XÁC ĐỊNH (Chờ xác nhận)"
+        # Trạng thái so với xu hướng lớn
+        aligned = (current_trend == 1 and direction == "BUY") or \
+                  (current_trend == -1 and direction == "SELL")
+        if current_trend == 0:
+            status_text = f"❔ {htf_name} CHƯA XÁC ĐỊNH (Chờ xác nhận)"
         elif aligned:
-            status_text = "✅ VÀO LỆNH NGAY (Thuận H1)"
+            status_text = f"✅ VÀO LỆNH NGAY (Thuận {htf_name})"
         else:
-            status_text = "⏳ CHỜ XÁC NHẬN (Ngược H1)"
+            status_text = f"⏳ CHỜ XÁC NHẬN (Ngược {htf_name})"
 
         if direction == "BUY":
-            sl = low - 0.5
+            sl = low - buf
             risk = price - sl
             sign = 1
             side_txt, icon = "MUA", "📈"
         else:
-            sl = high + 0.5
+            sl = high + buf
             risk = sl - price
             sign = -1
             side_txt, icon = "BÁN", "📉"
@@ -251,26 +280,31 @@ def process_signal_data(data):
         if atr > 0 and risk < MIN_RISK_ATR * atr:
             send_telegram_message(
                 f"⚠️ Bỏ qua {side_txt} {symbol} ({sig_label}): SL quá gần "
-                f"(risk {round(risk, 2)} < {MIN_RISK_ATR} x ATR {round(atr, 2)})")
+                f"(risk {fmt_price(risk, price)} < {MIN_RISK_ATR} x ATR {fmt_price(atr, price)})")
             return
 
-        raw_vol = RISK_USD / (risk * contract_size)
-        vol = max(round(raw_vol, 2), 0.01)
         capped_note = ""
-        max_lot = MAX_LOT_BY_SYMBOL.get(symbol, MAX_LOT)
-        if vol > max_lot:
-            vol = max_lot
-            capped_note = f"\n⚠️ Volume đã bị giới hạn ở {max_lot} lots"
+        if contract_size is None:
+            vol = ""
+            vol_line = "📦 Vol: <code>chưa cấu hình contract size</code>"
+        else:
+            raw_vol = RISK_USD / (risk * contract_size)
+            vol = max(round(raw_vol, 2), 0.01)
+            max_lot = MAX_LOT_BY_SYMBOL.get(symbol, MAX_LOT)
+            if vol > max_lot:
+                vol = max_lot
+                capped_note = f"\n⚠️ Volume đã bị giới hạn ở {max_lot} lots"
+            vol_line = f"📦 Vol: <code>{vol} lots</code>"
 
         tp1, tp2, tp3 = (price + sign * risk * k for k in (3, 5, 7))
         now_str = now_local().strftime("%Y-%m-%d %H:%M:%S")
 
-        msg = (f"{status_text} <b>{sig_label}: {side_txt} {symbol}</b>\n"
-               f"{icon} <b>SuperTrendM15:</b> {st_trend}\n"
+        msg = (f"{status_text} <b>{sig_label}: {side_txt} {symbol}</b> ({entry_tf})\n"
+               f"{icon} <b>SuperTrend{entry_tf}:</b> {st_trend}\n"
                f"💰 Entry: <code>{price}</code>\n"
-               f"🛑 SL: <code>{round(sl, 2)}</code>\n"
-               f"🎯 TP1: <code>{round(tp1, 2)}</code> | TP2: <code>{round(tp2, 2)}</code> | TP3: <code>{round(tp3, 2)}</code>\n"
-               f"📦 Vol: <code>{vol} lots</code>{capped_note}")
+               f"🛑 SL: <code>{fmt_price(sl, price)}</code>\n"
+               f"🎯 TP1: <code>{fmt_price(tp1, price)}</code> | TP2: <code>{fmt_price(tp2, price)}</code> | TP3: <code>{fmt_price(tp3, price)}</code>\n"
+               f"{vol_line}{capped_note}")
         send_telegram_message(msg)
         write_to_csv(now_str, symbol, direction, sig_label, price, sl, tp1, tp2, tp3, vol, status_text)
     except Exception as e:
@@ -294,7 +328,7 @@ def webhook_h1():
         if trend is None:
             return jsonify({"status": "ignored", "action": action})
 
-        handle_h1_trend(symbol, trend, data)
+        handle_h1_trend(symbol, trend, data, trend_tf_of_action(action))
         return jsonify({"status": "success", "current_trend": h1_trend_state.get(symbol, 0)})
     except Exception as e:
         print(f"LỖI webhook_h1: {e}")
