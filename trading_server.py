@@ -96,7 +96,7 @@ def write_to_csv(time_str, symbol, action, sig_type, entry, sl, tp1, tp2, tp3, v
                 writer.writerow(["Thời Gian", "Mã", "Hành Động", "Loại Tín Hiệu", "Trạng Thái",
                                  "Entry", "SL", "TP1", "TP2", "TP3", "Volume"])
             clean_sig = sig_type
-            for icon in ("✅ ", "⚠️ ", "⚡ ", "🔥 "):
+            for icon in ("✅ ", "⚠️ ", "⚡ ", "🔥 ", "🎯 "):
                 clean_sig = clean_sig.replace(icon, "")
             writer.writerow([time_str, symbol, action, clean_sig, status,
                              entry, round(sl, 2), round(tp1, 2), round(tp2, 2), round(tp3, 2), vol])
@@ -205,9 +205,21 @@ def process_signal_data(data):
         contract_size = CONTRACT_SIZE[symbol]
         current_h1_trend = h1_trend_state.get(symbol, 0)
 
+        # Alert M15 (bản mới) gửi kèm hướng H1 của nến H1 đã đóng -> dùng luôn và tự phục hồi state,
+        # không phụ thuộc việc Render có bị reset hay không.
+        h1_in = to_float(data.get("h1"))
+        if h1_in in (1.0, -1.0):
+            current_h1_trend = int(h1_in)
+            if h1_trend_state.get(symbol, 0) != current_h1_trend:
+                with _lock:
+                    h1_trend_state[symbol] = current_h1_trend
+                    save_state()
+
         sig_label = "🔥 CẮT SLOW BASELINE"
         if "EARLY_WARNING" in action:
             sig_label = "⚠️ CẢNH BÁO SỚM"
+        elif "PULLBACK" in action:
+            sig_label = "🎯 RSI PULLBACK"
         elif "RSI" in action:
             sig_label = "⚡ RSI"
 
