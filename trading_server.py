@@ -19,7 +19,7 @@ MAX_LOT = float(os.environ.get("MAX_LOT", 3.0))        # Trần volume an toàn 
 MIN_RISK_ATR = float(os.environ.get("MIN_RISK_ATR", 0.3))  # SL tối thiểu = 0.3 x ATR, gần hơn thì bỏ tín hiệu
 
 # Tỷ giá quy đổi sang USD (chỉnh bằng biến môi trường trên Render khi tỷ giá lệch nhiều)
-USDJPY = float(os.environ.get("USDJPY", 158.8))
+USDJPY = float(os.environ.get("USDJPY", 159.3))
 EURUSD = float(os.environ.get("EURUSD", 1.16))
 
 # Giá trị (USD) khi giá đi 1.00 điểm với 1 lot — đã đối chiếu với lệnh thật trên tài khoản của bạn
@@ -31,11 +31,13 @@ CONTRACT_SIZE = {
     "BTCUSD": 1,            # đã kiểm tra: 0.24 lot, giá đi 803.66 -> 192.88 USD
 }
 
-# Forex chuẩn (1 lot = 100.000 đơn vị) — CHƯA kiểm tra trên tài khoản của bạn, xác nhận trước khi dùng thật
-CONTRACT_SIZE["EURUSD"] = 100000
-CONTRACT_SIZE["USDJPY"] = 100000 / USDJPY
-# US30, NEARUSD, USOIL: chưa có số đã kiểm tra -> tin vẫn gửi nhưng Vol ghi "chưa cấu hình".
-# Khi đã xác nhận, đặt trên Render, ví dụ: CONTRACT_SIZE_JSON={"US30": 1, "USOIL": 1000}
+# Đã đối chiếu với lệnh thật 0.05 lot trên tài khoản của bạn (MT5):
+CONTRACT_SIZE["EURUSD"] = 100000          # giá đi 0.00403 -> -20.15 USD
+CONTRACT_SIZE["USDJPY"] = 100000 / USDJPY # ~627.6 USD / 1.00 / lot (100.000 JPY quy theo tỷ giá)
+CONTRACT_SIZE["US30"] = 1                 # giá đi 966.02 -> +48.30 USD (1 USD/điểm/lot)
+CONTRACT_SIZE["NEARUSD"] = 10000          # giá đi 0.187 -> -93.50 USD (1 lot = 10.000 NEAR)
+CONTRACT_SIZE["USOIL"] = 100              # giá đi 0.129 -> -0.65 USD (1 lot = 100 thùng)
+# Có thể ghi đè bằng biến môi trường trên Render, ví dụ CONTRACT_SIZE_JSON={"USOIL": 100}
 try:
     CONTRACT_SIZE.update({k.upper(): float(v) for k, v in json.loads(os.environ.get("CONTRACT_SIZE_JSON", "{}")).items()})
 except Exception as e:
@@ -194,6 +196,34 @@ def handle_h1_trend(symbol, trend, data=None, tf_name="H1"):
 # ==========================================
 # XỬ LÝ TÍN HIỆU M15 (TRIGGER)
 # ==========================================
+# Gộp các tín hiệu cùng mã + cùng chiều + cùng nến (cùng giá đóng) thành MỘT tin ghi đủ lý do.
+MERGE_WINDOW = float(os.environ.get("MERGE_WINDOW_SEC", 5))
+_pending = {}
+_pending_lock = threading.Lock()
+
+
+def _flush_card(key):
+    with _pending_lock:
+        card = _pending.pop(key, None)
+    if not card:
+        return
+    try:
+        reasons = " + ".join(card["labels"])
+        msg = (f"{card['status_text']} <b>{reasons}: {card['side_txt']} {card['symbol']}</b> ({card['entry_tf']})\n"
+               f"{card['icon']} <b>SuperTrend{card['entry_tf']}:</b> {card['st_trend']}\n"
+               f"💰 Entry: <code>{card['price']}</code>\n"
+               f"🛑 SL: <code>{fmt_price(card['sl'], card['price'])}</code>\n"
+               f"🎯 TP1: <code>{fmt_price(card['tp1'], card['price'])}</code> | "
+               f"TP2: <code>{fmt_price(card['tp2'], card['price'])}</code> | "
+               f"TP3: <code>{fmt_price(card['tp3'], card['price'])}</code>\n"
+               f"{card['vol_line']}{card['capped_note']}")
+        send_telegram_message(msg)
+        write_to_csv(card["now_str"], card["symbol"], card["direction"], reasons, card["price"], card["sl"],
+                     card["tp1"], card["tp2"], card["tp3"], card["vol"], card["status_text"])
+    except Exception as e:
+        print(f"Lỗi gửi tin gộp: {e}")
+
+
 def process_signal_data(data):
     try:
         action = str(data.get("action", ""))
@@ -299,14 +329,25 @@ def process_signal_data(data):
         tp1, tp2, tp3 = (price + sign * risk * k for k in (3, 5, 7))
         now_str = now_local().strftime("%Y-%m-%d %H:%M:%S")
 
-        msg = (f"{status_text} <b>{sig_label}: {side_txt} {symbol}</b> ({entry_tf})\n"
-               f"{icon} <b>SuperTrend{entry_tf}:</b> {st_trend}\n"
-               f"💰 Entry: <code>{price}</code>\n"
-               f"🛑 SL: <code>{fmt_price(sl, price)}</code>\n"
-               f"🎯 TP1: <code>{fmt_price(tp1, price)}</code> | TP2: <code>{fmt_price(tp2, price)}</code> | TP3: <code>{fmt_price(tp3, price)}</code>\n"
-               f"{vol_line}{capped_note}")
-        send_telegram_message(msg)
-        write_to_csv(now_str, symbol, direction, sig_label, price, sl, tp1, tp2, tp3, vol, status_text)
+        card = {"symbol": symbol, "direction": direction, "side_txt": side_txt, "icon": icon,
+                "entry_tf": entry_tf, "st_trend": st_trend, "price": price, "sl": sl,
+                "tp1": tp1, "tp2": tp2, "tp3": tp3, "vol": vol, "vol_line": vol_line,
+                "capped_note": capped_note, "status_text": status_text, "now_str": now_str,
+                "labels": [sig_label]}
+        key = (symbol, direction, entry_tf, price)
+        with _pending_lock:
+            existing = _pending.get(key)
+            if existing is not None:
+                if sig_label not in existing["labels"]:
+                    existing["labels"].append(sig_label)
+                return  # đã có tin đang chờ gửi cho nến này -> chỉ bổ sung lý do
+            _pending[key] = card
+        if MERGE_WINDOW <= 0:
+            _flush_card(key)
+        else:
+            t = threading.Timer(MERGE_WINDOW, _flush_card, args=(key,))
+            t.daemon = True
+            t.start()
     except Exception as e:
         print(f"Lỗi xử lý: {e}")
 
