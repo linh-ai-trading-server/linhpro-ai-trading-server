@@ -4,6 +4,13 @@ import json
 import os
 import csv
 import threading
+import math
+import hmac
+import re
+import html
+from contextlib import contextmanager
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from datetime import datetime, timezone, timedelta
 
 app = Flask(__name__)
@@ -79,14 +86,35 @@ def load_state():
 
 
 def save_state():
+    with db() as c:
+        for symbol, trend in h1_trend_state.items():
+            c.execute('INSERT INTO trend_v37 VALUES (%s,%s) ON CONFLICT (symbol) DO UPDATE SET trend=EXCLUDED.trend', (symbol,trend))
+
+
+@contextmanager
+def db():
+    conn = psycopg2.connect(os.environ['DATABASE_URL'], connect_timeout=5, cursor_factory=RealDictCursor)
     try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(h1_trend_state, f)
-    except Exception as e:
-        print(f"LỖI LƯU STATE: {e}")
+        with conn:
+            with conn.cursor() as cur:
+                yield cur
+    finally:
+        conn.close()
 
 
-h1_trend_state = load_state()  # {"XAUUSD": 1 (tăng) | -1 (giảm) | 0 (chưa rõ)}
+def init_db():
+    with db() as c:
+        c.execute("CREATE TABLE IF NOT EXISTS trend_v37 (symbol text PRIMARY KEY, trend integer NOT NULL)")
+        c.execute("CREATE TABLE IF NOT EXISTS signals_v37 (id bigserial PRIMARY KEY, created timestamptz DEFAULT now(), payload jsonb NOT NULL)")
+        c.execute("CREATE TABLE IF NOT EXISTS risk_positions (id text PRIMARY KEY, symbol text NOT NULL, side text NOT NULL, entry double precision NOT NULL, sl double precision NOT NULL, qty double precision NOT NULL, multiplier double precision NOT NULL, initial_sl double precision NOT NULL, closed boolean NOT NULL DEFAULT false)")
+        c.execute("CREATE TABLE IF NOT EXISTS risk_updates (id bigint PRIMARY KEY)")
+
+
+init_db()
+with db() as c:
+    c.execute('SELECT symbol, trend FROM trend_v37')
+    h1_trend_state = {r['symbol']: r['trend'] for r in c.fetchall()}
+  # {"XAUUSD": 1 (tăng) | -1 (giảm) | 0 (chưa rõ)}
 
 
 # ==========================================
@@ -103,18 +131,9 @@ def send_telegram_message(message):
 
 
 def write_to_csv(time_str, symbol, action, sig_type, entry, sl, tp1, tp2, tp3, vol, status):
-    with _lock:
-        file_exists = os.path.isfile(CSV_FILE)
-        with open(CSV_FILE, mode='a', newline='', encoding='utf-8') as file:
-            writer = csv.writer(file)
-            if not file_exists:
-                writer.writerow(["Thời Gian", "Mã", "Hành Động", "Loại Tín Hiệu", "Trạng Thái",
-                                 "Entry", "SL", "TP1", "TP2", "TP3", "Volume"])
-            clean_sig = sig_type
-            for icon in ("✅ ", "⚠️ ", "⚡ ", "🔥 ", "🎯 "):
-                clean_sig = clean_sig.replace(icon, "")
-            writer.writerow([time_str, symbol, action, clean_sig, status,
-                             entry, round(sl, 6), round(tp1, 6), round(tp2, 6), round(tp3, 6), vol])
+    payload = dict(time=time_str, symbol=symbol, action=action, signal=sig_type, entry=entry, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3, volume=vol, status=status)
+    with db() as c:
+        c.execute('INSERT INTO signals_v37 (payload) VALUES (%s::jsonb)', (json.dumps(payload, ensure_ascii=False),))
 
 
 def to_float(value):
@@ -398,10 +417,82 @@ def webhook_m15():
 def home():
     return jsonify({
         "status": "running",
+        "version": "3.7",
         "h1_states": h1_trend_state,
         "time": now_local().isoformat()
     })
 
+
+def install(app, send):
+    secret=os.getenv('TELEGRAM_WEBHOOK_SECRET','')
+    chat=os.environ['CHAT_ID']
+    users={x.strip() for x in os.getenv('RISK_ADMIN_IDS','').split(',') if x.strip()}
+    limit=float(os.getenv('PORTFOLIO_RISK_LIMIT','300'))
+    capital=float(os.getenv('ACCOUNT_CAPITAL','25000'))
+    if not secret or not users or not all(x.isdigit() for x in users) or not all(math.isfinite(x) and x>0 for x in (limit,capital)): raise ValueError('Invalid risk configuration')
+    def num(s):
+        x=float(s)
+        if not math.isfinite(x) or x<=0: raise ValueError('Số phải hữu hạn và > 0')
+        return x
+    def report(c):
+        c.execute('SELECT * FROM risk_positions WHERE NOT closed ORDER BY id')
+        rows=c.fetchall()
+        total=0; lines=['<b>V3.7 PORTFOLIO RISK</b>']
+        for p in rows:
+            r=max(0,(p['entry']-p['sl'])*(1 if p['side']=='BUY' else -1))*p['qty']*p['multiplier']; total+=r
+            lines.append(f"{p['id']} | {p['symbol']} {p['side']} | ${r:.2f}")
+        lines += [f'Tổng: ${total:.2f} / ${limit:.2f} ({100*total/capital:.2f}% vốn tham chiếu)', '⚠️ VƯỢT NGƯỠNG' if total>limit else '⚠️ CHẠM NGƯỠNG' if total==limit else 'Dưới ngưỡng theo dữ liệu đã nhập', 'Chỉ lệnh đã xác nhận; chưa đối soát broker; chưa gồm phí/trượt giá. Không chặn tín hiệu.']
+        return '\n'.join(lines)
+    @app.post('/telegram_risk')
+    def telegram_risk():
+        if not hmac.compare_digest(request.headers.get('X-Telegram-Bot-Api-Secret-Token',''),secret): return jsonify(error='unauthorized'),403
+        d=request.get_json() or {}; m=d.get('message') or {}
+        if str(m.get('chat',{}).get('id'))!=chat or str(m.get('from',{}).get('id')) not in users: return jsonify(ok=True)
+        a=m.get('text','').split()
+        if not a: return jsonify(ok=True)
+        cmd=a[0].split('@')[0].lower()
+        if cmd not in ('/risk','/open','/sl','/reduce','/close','/riskhelp'): return jsonify(ok=True)
+        try:
+            with db() as c:
+                c.execute('INSERT INTO risk_updates VALUES (%s) ON CONFLICT DO NOTHING RETURNING id',(d['update_id'],))
+                if not c.fetchone(): return jsonify(ok=True)
+                c.execute('SELECT pg_advisory_xact_lock(37001)')
+                if cmd=='/open':
+                    if len(a) not in (7,8): raise ValueError('/open ID SYMBOL BUY|SELL ENTRY SL LOT [USD_PER_POINT_PER_LOT]')
+                    _,i,s,side,e,sl,q,*extra=a; s=normalize_symbol(s); side=side.upper(); e,sl,q=map(num,(e,sl,q)); k=num(extra[0] if extra else CONTRACT_SIZE.get(s,0))
+                    if not all(re.fullmatch(r'[A-Za-z0-9_-]{1,32}',v) for v in (i,s)) or side not in ('BUY','SELL') or (e-sl)*(1 if side=='BUY' else -1)<=0: raise ValueError('ID/mã/chiều/SL không hợp lệ')
+                    c.execute('INSERT INTO risk_positions VALUES (%s,%s,%s,%s,%s,%s,%s,%s,false)',(i,s,side,e,sl,q,k,sl))
+                elif cmd in ('/sl','/reduce','/close'):
+                    if len(a)!=(2 if cmd=='/close' else 3): raise ValueError('Sai cú pháp')
+                    c.execute('SELECT * FROM risk_positions WHERE id=%s AND NOT closed FOR UPDATE',(a[1],))
+                    p=c.fetchone()
+                    if not p: raise ValueError('Không tìm thấy lệnh mở')
+                    if cmd=='/sl': c.execute('UPDATE risk_positions SET sl=%s WHERE id=%s',(num(a[2]),a[1]))
+                    elif cmd=='/reduce':
+                        q=num(a[2]);
+                        if q>=p['qty']: raise ValueError('Nhập LOT còn lại nhỏ hơn LOT hiện tại; dùng /close nếu hết')
+                        c.execute('UPDATE risk_positions SET qty=%s WHERE id=%s',(q,a[1]))
+                    else: c.execute('UPDATE risk_positions SET closed=true WHERE id=%s',(a[1],))
+                msg=report(c) if cmd!='/riskhelp' else '/open ID SYMBOL BUY|SELL ENTRY SL LOT [USD_PER_POINT_PER_LOT]\n/sl ID SL_MOI\n/reduce ID LOT_CON_LAI\n/close ID\n/risk'
+            send(msg)
+        except (ValueError, psycopg2.errors.UniqueViolation) as e:
+            send('Không cập nhật: '+('ID đã tồn tại' if isinstance(e,psycopg2.errors.UniqueViolation) else str(e).replace('<','&lt;').replace('>','&gt;')))
+        return jsonify(ok=True)
+    return report
+
+
+@app.get('/health/db')
+def health_db():
+    try:
+        with db() as c:
+            c.execute('SELECT 1')
+        return jsonify(status='ok', database='connected', version='3.7', telegram_risk_enabled=bool(os.getenv('TELEGRAM_WEBHOOK_SECRET') and os.getenv('RISK_ADMIN_IDS')))
+    except Exception:
+        return jsonify(status='error', database='unavailable'), 503
+
+
+if os.getenv('TELEGRAM_WEBHOOK_SECRET') and os.getenv('RISK_ADMIN_IDS'):
+    risk_report = install(app, send_telegram_message)
 
 if __name__ == '__main__':
     # Render cần đọc PORT từ biến môi trường
